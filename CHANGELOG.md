@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/waf_count_report.py`: reports what count-mode rules would block if
+  enforced, read from the module's CloudWatch log group via Logs Insights.
+  Deduplicates by request and separates net-new blocks from raw rule matches,
+  breaks impact down by rule group, rule, URI, source IP and country, and can
+  gate a pipeline with `--max-block-percent`.
+- Test suite for the report script, plus ruff and pytest gates in pre-commit
+  and CI.
+
 ## [0.1.0] - 2026-08-08
 
 ### Added

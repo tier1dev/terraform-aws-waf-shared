@@ -1,0 +1,7 @@
+# Development dependencies for scripts/waf_count_report.py
+# Install with: pip install -r scripts/requirements-dev.txt
+# Run the suite with: python -m pytest tests/
+
+boto3>=1.34.0
+pytest==9.1.1
+ruff==0.15.12
