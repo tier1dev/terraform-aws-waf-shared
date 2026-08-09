@@ -4,3 +4,9 @@
 *.tfstate.backup
 crash.log
 .memsearch/
+
+# Python tooling for scripts/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/

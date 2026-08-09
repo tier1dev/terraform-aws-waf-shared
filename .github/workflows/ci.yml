@@ -43,3 +43,21 @@ jobs:
           scan-type: config
           scan-ref: .
           exit-code: "1"
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: install
+        run: pip install -r scripts/requirements-dev.txt
+
+      - name: ruff
+        run: ruff check --line-length 100 scripts/ tests/
+
+      - name: pytest
+        run: python -m pytest tests/ -q

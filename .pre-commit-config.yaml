@@ -14,3 +14,10 @@ repos:
       - id: terraform_trivy
         args:
           - --args=--skip-dirs="**/.terraform"
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.12
+    hooks:
+      - id: ruff-check
+        args: [--line-length=100]
+        files: ^(scripts|tests)/.*\.py$

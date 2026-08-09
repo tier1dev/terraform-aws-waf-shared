@@ -76,6 +76,76 @@ See [examples/](examples/) for complete, validated configurations.
 Set `override_action = "count"` on a managed rule group to run it in
 detection-only mode before enforcing it.
 
+## Reading count mode results
+
+Count mode only helps if you read the counts. `scripts/waf_count_report.py`
+answers the question that decides whether a group is safe to enforce: how much
+real traffic it would have blocked, which rule fired, and against which URIs.
+
+Requires `enable_logging = true` — the script reads the log group this module
+creates.
+
+```sh
+pip install boto3
+
+# What would enforcing these groups have blocked in the last 24 hours?
+./scripts/waf_count_report.py --name my-acl
+
+# A week, as JSON
+./scripts/waf_count_report.py --name my-acl --hours 168 --format json
+
+# CLOUDFRONT-scoped ACLs log to us-east-1 wherever the origin runs
+./scripts/waf_count_report.py --name my-acl --region us-east-1
+```
+
+Sample output:
+
+```
+Total requests logged:          20000
+Requests matching a count rule: 66
+Would be newly blocked:         61 (0.30% of traffic)
+
+  RULE GROUP                                             MATCHED  NEW BLOCKS  % TRAFFIC
+  ---------------------------------------------------- --------- ----------- ----------
+  AWS#AWSManagedRulesCommonRuleSet                            52          52      0.26%
+  AWS#AWSManagedRulesKnownBadInputsRuleSet                     5           0      0.00%
+
+  AWS#AWSManagedRulesCommonRuleSet / SQLi_BODY
+    matches: 52   would newly block: 52   distinct client IPs: 4
+    top URIs:       /api/graphql (40), /upload (12)
+    e.g. POST /api/graphql from 10.0.0.0 (US) currently ALLOW
+```
+
+Read that as: `SQLi_BODY` is about to start blocking your own GraphQL endpoint.
+Add a `rule_action_override` for it before flipping the group to `none`.
+
+**Matched and new blocks differ on purpose.** A request can match several count
+rules at once, and a request some other rule already blocks would not change
+outcome if a counted rule started enforcing too. Summing rule match counts
+overstates the impact, sometimes by a lot. The report deduplicates by request,
+and `NEW BLOCKS` is the number that matters. In the sample above,
+KnownBadInputs matched 5 requests but would block 0 new ones — all 5 were
+already blocked by an enforcing rule.
+
+To gate a pipeline on it, set a budget:
+
+```sh
+./scripts/waf_count_report.py --name my-acl --max-block-percent 0.25
+```
+
+Exits 1 when the projected new block rate exceeds the threshold, 0 when it is
+at or under it, and 2 when the log group does not exist.
+
+Note that Insights caps a query at 10,000 rows. The report warns when it hits
+that ceiling, in which case the counts are a floor rather than a total — narrow
+the window with `--hours`.
+
+### Costs
+
+Insights bills per GB scanned. The report runs two queries per invocation (one
+counting total requests, one fetching count matches), both bounded by
+`--hours`. On a busy ACL, prefer short windows over a week-long lookback.
+
 ## Cost warning
 
 WAF charges a fixed monthly fee the moment the ACL exists — **you pay even
