@@ -30,8 +30,11 @@ module "waf" {
   rate_limit_per_5_minutes = 2000
 
   tags = {
+    Customer    = "example"
     Application = "waf-shared"
     Environment = "prod"
+    Owner       = "security@example.com"
+    Costcenter  = "security"
   }
 }
 

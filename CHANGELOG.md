@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional, disabled-by-default production CloudWatch alarms with a single
+  notification path, governance tag enforcement, and Terraform tests.
+- A single-request HTTPS smoke test that refuses redirects, credentials,
+  response downloads, attack payloads, and rate-limit bursts.
+- Companion links, AWS/IAM prerequisites, deployment commands, and repository
+  validation instructions in the README.
+
 ## [0.2.0] - 2026-08-08
 
 ### Added

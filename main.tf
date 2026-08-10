@@ -38,6 +38,11 @@ resource "aws_wafv2_web_acl" "this" {
       condition     = var.scope == "REGIONAL" || length(var.association_resource_arns) == 0
       error_message = "association_resource_arns only supports REGIONAL resources. Attach CloudFront distributions via their web_acl_id argument."
     }
+
+    precondition {
+      condition     = !var.enable_production_alarms || local.production_alarm_tags_valid
+      error_message = "Production alarms require non-empty Customer, Application, Environment, Owner, and Costcenter tags, with Environment set to prod."
+    }
   }
 
   default_action {
