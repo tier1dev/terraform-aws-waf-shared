@@ -32,3 +32,21 @@ output "log_group_arn" {
   description = "ARN of the WAF CloudWatch log group, or null when logging is disabled."
   value       = one(aws_cloudwatch_log_group.waf[*].arn)
 }
+
+output "notification_alarm_name" {
+  description = "Name of the production alarm that owns notification actions, or null when production alarms are disabled."
+  value = var.enable_production_alarms ? (
+    local.rate_limit_enabled ?
+    aws_cloudwatch_composite_alarm.security_events[0].alarm_name :
+    aws_cloudwatch_metric_alarm.blocked_requests[0].alarm_name
+  ) : null
+}
+
+output "notification_alarm_arn" {
+  description = "ARN of the production alarm that owns notification actions, or null when production alarms are disabled."
+  value = var.enable_production_alarms ? (
+    local.rate_limit_enabled ?
+    aws_cloudwatch_composite_alarm.security_events[0].arn :
+    aws_cloudwatch_metric_alarm.blocked_requests[0].arn
+  ) : null
+}

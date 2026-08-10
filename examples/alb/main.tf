@@ -37,7 +37,10 @@ module "waf" {
   ]
 
   tags = {
+    Customer    = "example"
     Application = "waf-shared"
     Environment = "prod"
+    Owner       = "security@example.com"
+    Costcenter  = "security"
   }
 }

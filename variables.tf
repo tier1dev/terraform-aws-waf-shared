@@ -92,6 +92,40 @@ variable "log_kms_key_arn" {
   default     = null
 }
 
+variable "enable_production_alarms" {
+  description = "Create cost-incurring production CloudWatch alarms for blocked requests. Disabled by default and rejected unless the required Environment tag is prod."
+  type        = bool
+  default     = false
+}
+
+variable "alarm_action_arns" {
+  description = "SNS topic or other CloudWatch action ARNs notified by the production alarm. Keep actions in the module provider region; CloudFront alarms use us-east-1."
+  type        = list(string)
+  default     = []
+}
+
+variable "blocked_requests_alarm_threshold" {
+  description = "Blocked requests across the shared web ACL in one 5-minute period that can trigger the production alarm. Tune for aggregate traffic across every association."
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.blocked_requests_alarm_threshold > 0
+    error_message = "The blocked_requests_alarm_threshold must be greater than zero."
+  }
+}
+
+variable "rate_limit_blocks_alarm_threshold" {
+  description = "Requests blocked by the rate-limit rule in one 5-minute period that can trigger the production alarm. Used only when rate limiting is enabled."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.rate_limit_blocks_alarm_threshold > 0
+    error_message = "The rate_limit_blocks_alarm_threshold must be greater than zero."
+  }
+}
+
 variable "tags" {
   description = "Tags applied to all resources created by this module."
   type        = map(string)

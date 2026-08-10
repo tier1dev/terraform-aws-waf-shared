@@ -28,6 +28,9 @@ jobs:
             terraform -chdir="$dir" validate
           done
 
+      - name: terraform test
+        run: terraform test
+
       - uses: terraform-linters/setup-tflint@v6
         with:
           tflint_version: v0.64.0
