@@ -26,11 +26,65 @@ variable "default_action" {
 }
 
 variable "managed_rule_groups" {
-  description = "AWS managed rule groups to attach, evaluated in list order. Set override_action to count to run a group in detection-only mode."
+  description = "Managed rule groups to attach, evaluated in list order. Standard AWS and Marketplace groups need only name/vendor_name. AWS premium groups require their matching configuration object."
   type = list(object({
-    name            = string
-    vendor_name     = optional(string, "AWS")
-    override_action = optional(string, "none")
+    name                  = string
+    vendor_name           = optional(string, "AWS")
+    version               = optional(string)
+    override_action       = optional(string, "none")
+    rule_action_overrides = optional(map(string), {})
+    bot_control = optional(object({
+      inspection_level        = string
+      enable_machine_learning = optional(bool, false)
+    }))
+    account_takeover_prevention = optional(object({
+      login_path           = string
+      enable_regex_in_path = optional(bool, false)
+      request_inspection = optional(object({
+        payload_type              = string
+        username_field_identifier = string
+        password_field_identifier = string
+      }))
+      response_inspection = optional(object({
+        type            = string
+        success_strings = optional(set(string), [])
+        failure_strings = optional(set(string), [])
+        success_codes   = optional(set(number), [])
+        failure_codes   = optional(set(number), [])
+        header_name     = optional(string)
+        json_identifier = optional(string)
+      }))
+    }))
+    account_creation_fraud_prevention = optional(object({
+      creation_path          = string
+      registration_page_path = string
+      enable_regex_in_path   = optional(bool, false)
+      request_inspection = object({
+        payload_type                   = string
+        username_field_identifier      = optional(string)
+        password_field_identifier      = optional(string)
+        email_field_identifier         = optional(string)
+        address_field_identifiers      = optional(list(string), [])
+        phone_number_field_identifiers = optional(list(string), [])
+      })
+      response_inspection = optional(object({
+        type            = string
+        success_strings = optional(set(string), [])
+        failure_strings = optional(set(string), [])
+        success_codes   = optional(set(number), [])
+        failure_codes   = optional(set(number), [])
+        header_name     = optional(string)
+        json_identifier = optional(string)
+      }))
+    }))
+    anti_ddos = optional(object({
+      sensitivity_to_block = optional(string, "LOW")
+      client_side_challenge = object({
+        usage_of_action    = string
+        sensitivity        = optional(string, "HIGH")
+        exempt_uri_regexes = optional(list(string), [])
+      })
+    }))
   }))
   default = [
     { name = "AWSManagedRulesCommonRuleSet" },
@@ -41,6 +95,86 @@ variable "managed_rule_groups" {
   validation {
     condition     = alltrue([for g in var.managed_rule_groups : contains(["none", "count"], g.override_action)])
     error_message = "Each managed rule group override_action must be none or count."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for g in var.managed_rule_groups : [
+        for action in values(g.rule_action_overrides) :
+        contains(["allow", "block", "captcha", "challenge", "count"], action)
+      ]
+    ]))
+    error_message = "Each rule_action_overrides value must be allow, block, captcha, challenge, or count."
+  }
+
+  validation {
+    condition     = length(distinct([for g in var.managed_rule_groups : g.name])) == length(var.managed_rule_groups)
+    error_message = "Each managed rule group name may appear only once."
+  }
+
+  validation {
+    condition = alltrue([
+      for g in var.managed_rule_groups :
+      (g.vendor_name == "AWS" && g.name == "AWSManagedRulesBotControlRuleSet") == (g.bot_control != null) &&
+      (g.vendor_name == "AWS" && g.name == "AWSManagedRulesATPRuleSet") == (g.account_takeover_prevention != null) &&
+      (g.vendor_name == "AWS" && g.name == "AWSManagedRulesACFPRuleSet") == (g.account_creation_fraud_prevention != null) &&
+      (g.vendor_name == "AWS" && g.name == "AWSManagedRulesAntiDDoSRuleSet") == (g.anti_ddos != null)
+    ])
+    error_message = "Bot Control, ATP, ACFP, and Anti-DDoS groups require their matching configuration object, and those objects may only be used with the matching AWS group name."
+  }
+
+  validation {
+    condition = alltrue([
+      for g in var.managed_rule_groups : try(
+        contains(["COMMON", "TARGETED"], g.bot_control.inspection_level) &&
+        (g.bot_control.inspection_level == "TARGETED" || !g.bot_control.enable_machine_learning),
+        true
+      )
+    ])
+    error_message = "Bot Control inspection_level must be COMMON or TARGETED; machine learning is only valid for TARGETED inspection."
+  }
+
+  validation {
+    condition = alltrue([
+      for g in var.managed_rule_groups : try(
+        contains(["JSON", "FORM_ENCODED"], g.account_takeover_prevention.request_inspection.payload_type),
+        true
+        ) && try(
+        contains(["JSON", "FORM_ENCODED"], g.account_creation_fraud_prevention.request_inspection.payload_type),
+        true
+      )
+    ])
+    error_message = "ATP and ACFP request payload_type must be JSON or FORM_ENCODED."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for g in var.managed_rule_groups : [
+        for response in [
+          try(g.account_takeover_prevention.response_inspection, null),
+          try(g.account_creation_fraud_prevention.response_inspection, null),
+          ] : (
+          response.type == "STATUS_CODE" ? length(response.success_codes) > 0 && length(response.failure_codes) > 0 :
+          response.type == "HEADER" ? response.header_name != null && length(response.success_strings) > 0 && length(response.failure_strings) > 0 :
+          response.type == "JSON" ? response.json_identifier != null && length(response.success_strings) > 0 && length(response.failure_strings) > 0 :
+          response.type == "BODY_CONTAINS" ? length(response.success_strings) > 0 && length(response.failure_strings) > 0 :
+          false
+        ) if response != null
+      ]
+    ]))
+    error_message = "Response inspection type must be STATUS_CODE, HEADER, JSON, or BODY_CONTAINS and include the matching success/failure values and identifier."
+  }
+
+  validation {
+    condition = alltrue([
+      for g in var.managed_rule_groups : try(
+        contains(["LOW", "MEDIUM", "HIGH"], g.anti_ddos.sensitivity_to_block) &&
+        contains(["LOW", "MEDIUM", "HIGH"], g.anti_ddos.client_side_challenge.sensitivity) &&
+        contains(["ENABLED", "DISABLED"], g.anti_ddos.client_side_challenge.usage_of_action),
+        true
+      )
+    ])
+    error_message = "Anti-DDoS sensitivities must be LOW, MEDIUM, or HIGH, and usage_of_action must be ENABLED or DISABLED."
   }
 }
 
@@ -57,9 +191,15 @@ variable "blocked_country_codes" {
 }
 
 variable "allowed_ip_cidrs" {
-  description = "IPv4 CIDR blocks that bypass all subsequent rules (admin/office exceptions). Creates an IP set and an allow rule at the highest priority."
+  description = "IPv4 CIDR blocks for the allowlist IP set. They bypass later rules by default; set ip_allowlist_bypass_rules=false with default_action=block to inspect them before the final allow."
   type        = list(string)
   default     = []
+}
+
+variable "ip_allowlist_bypass_rules" {
+  description = "When true, allowed IPs bypass all other rules. Set false with default_action=block to inspect and rate-limit allowed IPs before allowing them; non-allowed IPs then reach the default block action."
+  type        = bool
+  default     = true
 }
 
 variable "rate_limit_per_5_minutes" {

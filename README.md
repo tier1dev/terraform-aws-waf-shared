@@ -2,9 +2,11 @@
 
 One WAFv2 web ACL, shared across many CloudFront distributions or ALBs.
 
-WAF pricing is per web ACL ($5/mo), per rule ($1/mo), and per million requests —
-but associating an existing ACL with another resource is free. This module
-leans into that: define the rules once, attach the ACL everywhere.
+WAF pricing is per web ACL ($5/mo), per custom rule or managed group reference
+($1/mo), and per million requests — but associating an existing ACL with
+another resource is free. AWS-managed groups cost one $1 reference regardless
+of their internal rule count; premium groups add subscriptions and usage fees.
+This module leans into sharing: define the rules once, attach the ACL everywhere.
 
 The module creates a single web ACL in one scope. Instantiate it twice if you
 need both CloudFront and regional coverage.
@@ -72,7 +74,7 @@ provider "aws" {
 }
 
 module "waf" {
-  source = "git::https://github.com/tier1dev/terraform-aws-waf-shared.git?ref=v0.2.0"
+  source = "git::https://github.com/tier1dev/terraform-aws-waf-shared.git?ref=v0.3.0"
 
   providers = { aws = aws.us_east_1 }
 
@@ -96,7 +98,7 @@ region to `association_resource_arns`.
 
 ```hcl
 module "waf" {
-  source = "git::https://github.com/tier1dev/terraform-aws-waf-shared.git?ref=v0.2.0"
+  source = "git::https://github.com/tier1dev/terraform-aws-waf-shared.git?ref=v0.3.0"
 
   name  = "shared-regional"
   scope = "REGIONAL"
@@ -112,17 +114,176 @@ module "waf" {
 
 See [examples/](examples/) for complete, validated configurations.
 
+### Strict IP allowlist with security inspection
+
+`allowed_ip_cidrs` defaults to an administrative bypass: listed IPs are allowed
+at priority 0 and skip every later rule. For a private application where only
+your networks may connect **and** their requests must still pass rate and
+managed security rules, use block-by-default inspection mode:
+
+```hcl
+module "waf" {
+  source = "git::https://github.com/tier1dev/terraform-aws-waf-shared.git?ref=v0.3.0"
+
+  name  = "private-internal-app"
+  scope = "REGIONAL"
+
+  default_action            = "block"
+  allowed_ip_cidrs          = ["203.0.113.10/32", "198.51.100.0/24"]
+  ip_allowlist_bypass_rules = false
+  rate_limit_per_5_minutes  = 1000
+
+  managed_rule_groups = [
+    {
+      name            = "AWSManagedRulesCommonRuleSet"
+      override_action = "count"
+    },
+  ]
+}
+```
+
+With `ip_allowlist_bypass_rules = false`, rate and managed rules run first,
+the IP allow rule runs last, and every non-allowed source reaches the Web ACL's
+default block. The module rejects this mode unless `default_action = "block"`
+and at least one IPv4 CIDR is configured. Start managed groups in `count`,
+review logs, then change them to `none` to enforce their native actions.
+
 ## Rule evaluation order
 
 | Priority | Rule | Enabled by |
 |----------|------|------------|
-| 0 | IP allowlist (allow, bypasses everything below) | `allowed_ip_cidrs` |
+| 0 | IP allowlist administrative bypass | `allowed_ip_cidrs` with `ip_allowlist_bypass_rules = true` |
 | 10 | Geo blocklist or geo allowlist | `blocked_country_codes` / `allowed_country_codes` |
 | 20 | Rate limit per source IP | `rate_limit_per_5_minutes` |
 | 100+ | AWS managed rule groups, in list order | `managed_rule_groups` |
+| After managed groups | IP allowlist after inspection | `allowed_ip_cidrs` with `ip_allowlist_bypass_rules = false` |
 
 Set `override_action = "count"` on a managed rule group to run it in
-detection-only mode before enforcing it.
+detection-only mode before enforcing it. Use `rule_action_overrides` to tune an
+individual rule without disabling the entire group:
+
+```hcl
+managed_rule_groups = [{
+  name = "AWSManagedRulesCommonRuleSet"
+  rule_action_overrides = {
+    SizeRestrictions_BODY = "count"
+  }
+}]
+```
+
+## Managed rule catalog and selection guidance
+
+The module supports all groups in the current [AWS Managed Rules
+catalog](https://docs.aws.amazon.com/waf/latest/developerguide/aws-managed-rule-groups-list.html).
+The 11 standard groups need only `name`; the four premium groups also require
+the matching nested configuration shown below. An AWS-managed group is one
+billable group reference even when it contains many internal rules.
+
+| AWS managed group name | Cost class | Use when |
+|------------------------|------------|----------|
+| `AWSManagedRulesCommonRuleSet` | Standard | Nearly every public dynamic site or API; broad XSS, file-inclusion, SSRF, size, and OWASP-related coverage. |
+| `AWSManagedRulesAdminProtectionRuleSet` | Standard | A CMS or application exposes administrative paths; prefer authentication and network restrictions as the primary control. |
+| `AWSManagedRulesKnownBadInputsRuleSet` | Standard | Public applications and APIs need coverage for known exploit inputs such as Log4j, deserialization, and vulnerable paths. |
+| `AWSManagedRulesSQLiRuleSet` | Standard | Untrusted request data can reach a SQL database. |
+| `AWSManagedRulesLinuxRuleSet` | Standard | The application exposes Linux filesystem or local-file-inclusion attack surface; do not add it merely because Lambda runs on Linux. |
+| `AWSManagedRulesUnixRuleSet` | Standard | The application interacts with POSIX paths, commands, or shells. |
+| `AWSManagedRulesWindowsRuleSet` | Standard | The origin uses IIS, Windows Server, PowerShell, or Windows-hosted .NET. |
+| `AWSManagedRulesPHPRuleSet` | Standard | The application executes PHP, including Laravel, Drupal, Joomla, or WordPress. |
+| `AWSManagedRulesWordPressRuleSet` | Standard | WordPress only; normally combine with PHP and SQLi protection. |
+| `AWSManagedRulesAmazonIpReputationList` | Standard | A public site or API should reject sources AWS associates with bots, reconnaissance, or malicious activity. |
+| `AWSManagedRulesAnonymousIpList` | Standard | Product policy permits blocking VPN, proxy, Tor, and hosting-provider traffic; avoid it for privacy-sensitive consumer or remote-work applications. |
+| `AWSManagedRulesBotControlRuleSet` | Premium | A public property has measured scraping, automated abuse, inventory abuse, or bot-driven cost. |
+| `AWSManagedRulesATPRuleSet` | Premium | A public login endpoint has credential-stuffing or account-takeover risk. |
+| `AWSManagedRulesACFPRuleSet` | Premium | A public registration flow has fake-account or signup-bonus abuse. |
+| `AWSManagedRulesAntiDDoSRuleSet` | Premium | A high-value public application needs advanced Layer 7 DDoS mitigation beyond rate limits and Shield Standard. |
+
+Recommended starting combinations:
+
+| Application type | Start with | Add only when applicable |
+|------------------|------------|--------------------------|
+| Private dev, staging, or internal | Strict IP allowlist + rate limit | CRS in count mode for defense in depth |
+| Static CloudFront/S3 site | Rate limit + Amazon IP reputation | CRS for dynamic routes; Bot Control only after measured scraping |
+| Public REST, GraphQL, or serverless API | CRS + Known Bad Inputs + IP reputation + rate limit | SQLi for a SQL backend; tune CRS user-agent and body-size rules for API clients |
+| Public SaaS | CRS + Known Bad Inputs + IP reputation + rate limit | SQLi, ATP, or ACFP according to data store and observed auth abuse |
+| Ecommerce | CRS + Known Bad Inputs + SQLi + IP reputation + rate limit | Bot Control for scraping/inventory abuse; ATP/ACFP for account fraud |
+| WordPress | CRS + Known Bad Inputs + SQLi + PHP + WordPress + IP reputation + rate limit | Admin Protection after verifying legitimate admin paths |
+| Linux/POSIX service | CRS + Known Bad Inputs + Linux/POSIX + rate limit | SQLi when request data reaches SQL |
+| Windows/IIS/.NET service | CRS + Known Bad Inputs + Windows + rate limit | SQLi when request data reaches SQL |
+
+Do not stack groups just to fill a checklist. Overlap consumes Web ACL capacity,
+increases false-positive risk, and can push the ACL beyond the 1,500 WCUs
+included in base request pricing. Test each new group in count mode and promote
+it independently.
+
+### Premium managed group configuration
+
+Premium groups are deliberately explicit so a name-only configuration cannot
+reach apply and fail with a missing AWS managed-rule configuration. The module
+also validates inspection levels, payload types, response selectors, and
+Anti-DDoS sensitivities.
+
+```hcl
+managed_rule_groups = [
+  {
+    name            = "AWSManagedRulesBotControlRuleSet"
+    override_action = "count"
+    bot_control = {
+      inspection_level        = "TARGETED" # COMMON or TARGETED
+      enable_machine_learning = true       # TARGETED only
+    }
+  },
+  {
+    name            = "AWSManagedRulesATPRuleSet"
+    override_action = "count"
+    account_takeover_prevention = {
+      login_path = "/login"
+      request_inspection = {
+        payload_type              = "JSON"
+        username_field_identifier = "/email"
+        password_field_identifier = "/password"
+      }
+      # Response inspection is optional and CloudFront-only.
+      response_inspection = {
+        type          = "STATUS_CODE"
+        success_codes = [200]
+        failure_codes = [401, 403]
+      }
+    }
+  },
+  {
+    name            = "AWSManagedRulesACFPRuleSet"
+    override_action = "count"
+    account_creation_fraud_prevention = {
+      registration_page_path = "/signup"
+      creation_path          = "/register"
+      request_inspection = {
+        payload_type              = "JSON"
+        username_field_identifier = "/username"
+        password_field_identifier = "/password"
+        email_field_identifier    = "/email"
+      }
+    }
+  },
+  {
+    name            = "AWSManagedRulesAntiDDoSRuleSet"
+    override_action = "count"
+    anti_ddos = {
+      sensitivity_to_block = "LOW"
+      client_side_challenge = {
+        usage_of_action    = "ENABLED"
+        sensitivity        = "HIGH"
+        exempt_uri_regexes = ["^/api/webhooks/"]
+      }
+    }
+  },
+]
+```
+
+ATP and ACFP response inspection supports `STATUS_CODE`, `HEADER`, `JSON`, or
+`BODY_CONTAINS`, and AWS supports it only on CloudFront-protected applications.
+Request `payload_type` is `JSON` or `FORM_ENCODED`. Do not enable all premium
+groups together as a default; scope paid inspection to the relevant login,
+registration, or bot-sensitive traffic wherever AWS permits it.
 
 ## Optional production alarms
 
@@ -166,9 +327,9 @@ prices, the aggregate-only setup is about $0.10/month; the two metric alarms and
 one composite alarm are about $0.70/month. Verify current pricing on the
 [CloudWatch pricing page](https://aws.amazon.com/cloudwatch/pricing/).
 
-> **Version note:** the alarm inputs are currently available on `main` and are
-> not part of the existing `v0.2.0` tag. Cut a new module release before pinning
-> production consumers to this feature.
+> **Version note:** `v0.3.0` adds the alarm inputs, premium managed-group
+> configuration, per-rule overrides, and inspected IP allowlist mode described
+> in this README.
 
 ## Safe smoke test
 
@@ -229,7 +390,7 @@ Would be newly blocked:         61 (0.30% of traffic)
 ```
 
 Read that as: `SQLi_BODY` is about to start blocking your own GraphQL endpoint.
-Add a `rule_action_override` for it before flipping the group to `none`.
+Add it to `rule_action_overrides` before flipping the group to `none`.
 
 **Matched and new blocks differ on purpose.** A request can match several count
 rules at once, and a request some other rule already blocks would not change
@@ -277,28 +438,70 @@ runs TFLint and Trivy configuration scanning.
 ## Cost warning
 
 WAF charges a fixed monthly fee the moment the ACL exists — **you pay even
-with zero traffic**. Rough estimates (us-east-1 list prices, rounded):
+with zero traffic**. As of 2026-08-15, us-east-1 list pricing for the base WAF
+components is:
 
-| Configuration | Est. monthly baseline, no traffic |
-|---------------|-----------------------------------|
-| ACL + default 3 managed rule groups | ~$8 |
-| ACL + every module feature on (6 managed groups, geo, rate limit, IP allowlist) | ~$14 |
-| Both scopes instantiated (CloudFront + regional) with everything on | ~$28 |
+| Component | Price |
+|-----------|------:|
+| Web ACL | $5/month |
+| Custom rule, rate rule, or managed group reference | $1/month each |
+| IP set | No separate charge |
+| Requests at up to 1,500 WCUs | $0.60/million |
+| Each additional 500 WCUs above 1,500 | Additional $0.20/million |
 
-On top of the baseline:
+AWS charges one $1 managed-group reference for an AWS-managed group, not $1
+for every internal rule in that group. Rules inside a customer-created rule
+group remain $1 each, plus $1 for attaching that customer-created group.
 
-- Requests: ~$0.60 per million, billed once per ACL no matter how many
-  resources share it. Sharing one ACL is the whole point of this module.
-- Some managed rule groups carry their own subscription and per-request fees
-  (Bot Control, Fraud Control, Account Takeover Prevention — roughly $10/mo
-  each plus usage). None are in the module defaults; check before adding them.
-- Logging is off by default. `enable_logging = true` adds WAF log delivery
-  plus CloudWatch ingestion (~$0.50/GB) and storage.
+The four premium AWS groups add the following charges on top of the $1 managed
+group reference, $5 ACL, and ordinary WAF request fee:
 
-These are estimates only — pricing varies by region and changes over time.
-Verify against the [AWS WAF pricing page](https://aws.amazon.com/waf/pricing/)
-before deploying. **You are responsible for all costs this module incurs in
-your account.**
+| Premium group | Fixed addition on an existing ACL | Premium request fee |
+|---------------|----------------------------------:|--------------------:|
+| Bot Control — Common | $11/month | First 10M inspected requests included, then $1/million |
+| Bot Control — Targeted | $11/month | First 1M inspected requests included, then $10/million |
+| Account Takeover Prevention (ATP) | $11/month | First 10K Fraud Control requests included, then tiered from $1/1,000 |
+| Account Creation Fraud Prevention (ACFP) | $11/month | Same combined Fraud Control tiers |
+| Anti-DDoS | $21/month | $0.15/million inspected requests |
+
+The fixed premium additions include the normal $1 group reference plus a $10
+Bot Control/ATP/ACFP subscription or $20 Anti-DDoS subscription. If ATP and
+ACFP are both enabled, each has its own subscription and group reference; their
+analyzed requests share the Fraud Control usage tiers:
+
+| Combined ATP/ACFP requests per month | Fraud Control price |
+|--------------------------------------|--------------------:|
+| First 10,000 | Included |
+| 10K–2M | $1.00/1,000 |
+| 2M–5M | $0.70/1,000 |
+| 5M–15M | $0.40/1,000 |
+| 15M–30M | $0.20/1,000 |
+| Above 30M | $0.05/1,000 |
+
+Low-traffic fixed-cost examples, before request and logging charges:
+
+| Configuration | Estimated monthly baseline |
+|---------------|---------------------------:|
+| ACL + IP allow rule | $6 |
+| ACL + IP allow + rate limit + CRS | $8 |
+| Previous row + Known Bad Inputs | $9 |
+| $8 baseline + Common or Targeted Bot Control | $19 |
+| $8 baseline + ATP with fewer than 10K analyzed logins | $19 |
+| $8 baseline + both ATP and ACFP | $30 plus Fraud Control usage |
+| $8 baseline + Anti-DDoS | $29 plus $0.15/million inspected |
+
+For a strict IP-restricted application, premium groups are normally poor value:
+the allowlist already excludes outside bots, fraudulent registrations,
+credential stuffing, and most application-layer attack traffic. Prefer the $8
+IP allowlist + rate limit + CRS configuration unless logs demonstrate a threat
+the premium service addresses.
+
+Logging is off by default. `enable_logging = true` can add CloudWatch ingestion
+and storage charges. CAPTCHA attempts, challenge responses, increased body
+inspection, Marketplace groups, and provider-region differences can also add
+cost. Prices change; verify the current [AWS WAF pricing
+page](https://aws.amazon.com/waf/pricing/) before deploying. **You are
+responsible for all costs this module incurs in your account.**
 
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
@@ -306,7 +509,7 @@ your account.**
 | Name | Version |
 |------|---------|
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.5 |
-| <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.0, < 7.0 |
+| <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.1, < 7.0 |
 
 ## Providers
 
@@ -338,16 +541,17 @@ No modules.
 |------|-------------|------|---------|:--------:|
 | <a name="input_alarm_action_arns"></a> [alarm\_action\_arns](#input\_alarm\_action\_arns) | SNS topic or other CloudWatch action ARNs notified by the production alarm. Keep actions in the module provider region; CloudFront alarms use us-east-1. | `list(string)` | `[]` | no |
 | <a name="input_allowed_country_codes"></a> [allowed\_country\_codes](#input\_allowed\_country\_codes) | ISO 3166-1 alpha-2 country codes to allow. When non-empty, requests from any other country are blocked. Mutually exclusive with blocked\_country\_codes. | `list(string)` | `[]` | no |
-| <a name="input_allowed_ip_cidrs"></a> [allowed\_ip\_cidrs](#input\_allowed\_ip\_cidrs) | IPv4 CIDR blocks that bypass all subsequent rules (admin/office exceptions). Creates an IP set and an allow rule at the highest priority. | `list(string)` | `[]` | no |
+| <a name="input_allowed_ip_cidrs"></a> [allowed\_ip\_cidrs](#input\_allowed\_ip\_cidrs) | IPv4 CIDR blocks for the allowlist IP set. They bypass later rules by default; set ip\_allowlist\_bypass\_rules=false with default\_action=block to inspect them before the final allow. | `list(string)` | `[]` | no |
 | <a name="input_association_resource_arns"></a> [association\_resource\_arns](#input\_association\_resource\_arns) | ARNs of REGIONAL resources (ALBs, API Gateway stages, AppSync APIs) to associate with the web ACL. Must be empty for CLOUDFRONT scope — attach via the distribution's web\_acl\_id instead. | `list(string)` | `[]` | no |
 | <a name="input_blocked_country_codes"></a> [blocked\_country\_codes](#input\_blocked\_country\_codes) | ISO 3166-1 alpha-2 country codes to block. Mutually exclusive with allowed\_country\_codes. | `list(string)` | `[]` | no |
 | <a name="input_blocked_requests_alarm_threshold"></a> [blocked\_requests\_alarm\_threshold](#input\_blocked\_requests\_alarm\_threshold) | Blocked requests across the shared web ACL in one 5-minute period that can trigger the production alarm. Tune for aggregate traffic across every association. | `number` | `100` | no |
 | <a name="input_default_action"></a> [default\_action](#input\_default\_action) | Default action for requests that match no rule: allow or block. | `string` | `"allow"` | no |
 | <a name="input_enable_logging"></a> [enable\_logging](#input\_enable\_logging) | Send WAF request logs to a CloudWatch log group. Disabled by default to keep costs down. | `bool` | `false` | no |
 | <a name="input_enable_production_alarms"></a> [enable\_production\_alarms](#input\_enable\_production\_alarms) | Create cost-incurring production CloudWatch alarms for blocked requests. Disabled by default and rejected unless the required Environment tag is prod. | `bool` | `false` | no |
+| <a name="input_ip_allowlist_bypass_rules"></a> [ip\_allowlist\_bypass\_rules](#input\_ip\_allowlist\_bypass\_rules) | When true, allowed IPs bypass all other rules. Set false with default\_action=block to inspect and rate-limit allowed IPs before allowing them; non-allowed IPs then reach the default block action. | `bool` | `true` | no |
 | <a name="input_log_kms_key_arn"></a> [log\_kms\_key\_arn](#input\_log\_kms\_key\_arn) | Optional KMS key ARN to encrypt the WAF log group. | `string` | `null` | no |
 | <a name="input_log_retention_days"></a> [log\_retention\_days](#input\_log\_retention\_days) | Retention in days for the WAF CloudWatch log group. | `number` | `14` | no |
-| <a name="input_managed_rule_groups"></a> [managed\_rule\_groups](#input\_managed\_rule\_groups) | AWS managed rule groups to attach, evaluated in list order. Set override\_action to count to run a group in detection-only mode. | <pre>list(object({<br/>    name            = string<br/>    vendor_name     = optional(string, "AWS")<br/>    override_action = optional(string, "none")<br/>  }))</pre> | <pre>[<br/>  {<br/>    "name": "AWSManagedRulesCommonRuleSet"<br/>  },<br/>  {<br/>    "name": "AWSManagedRulesKnownBadInputsRuleSet"<br/>  },<br/>  {<br/>    "name": "AWSManagedRulesAmazonIpReputationList"<br/>  }<br/>]</pre> | no |
+| <a name="input_managed_rule_groups"></a> [managed\_rule\_groups](#input\_managed\_rule\_groups) | Managed rule groups to attach, evaluated in list order. Standard AWS and Marketplace groups need only name/vendor\_name. AWS premium groups require their matching configuration object. | <pre>list(object({<br/>    name                  = string<br/>    vendor_name           = optional(string, "AWS")<br/>    version               = optional(string)<br/>    override_action       = optional(string, "none")<br/>    rule_action_overrides = optional(map(string), {})<br/>    bot_control = optional(object({<br/>      inspection_level        = string<br/>      enable_machine_learning = optional(bool, false)<br/>    }))<br/>    account_takeover_prevention = optional(object({<br/>      login_path           = string<br/>      enable_regex_in_path = optional(bool, false)<br/>      request_inspection = optional(object({<br/>        payload_type              = string<br/>        username_field_identifier = string<br/>        password_field_identifier = string<br/>      }))<br/>      response_inspection = optional(object({<br/>        type            = string<br/>        success_strings = optional(set(string), [])<br/>        failure_strings = optional(set(string), [])<br/>        success_codes   = optional(set(number), [])<br/>        failure_codes   = optional(set(number), [])<br/>        header_name     = optional(string)<br/>        json_identifier = optional(string)<br/>      }))<br/>    }))<br/>    account_creation_fraud_prevention = optional(object({<br/>      creation_path          = string<br/>      registration_page_path = string<br/>      enable_regex_in_path   = optional(bool, false)<br/>      request_inspection = object({<br/>        payload_type                   = string<br/>        username_field_identifier      = optional(string)<br/>        password_field_identifier      = optional(string)<br/>        email_field_identifier         = optional(string)<br/>        address_field_identifiers      = optional(list(string), [])<br/>        phone_number_field_identifiers = optional(list(string), [])<br/>      })<br/>      response_inspection = optional(object({<br/>        type            = string<br/>        success_strings = optional(set(string), [])<br/>        failure_strings = optional(set(string), [])<br/>        success_codes   = optional(set(number), [])<br/>        failure_codes   = optional(set(number), [])<br/>        header_name     = optional(string)<br/>        json_identifier = optional(string)<br/>      }))<br/>    }))<br/>    anti_ddos = optional(object({<br/>      sensitivity_to_block = optional(string, "LOW")<br/>      client_side_challenge = object({<br/>        usage_of_action    = string<br/>        sensitivity        = optional(string, "HIGH")<br/>        exempt_uri_regexes = optional(list(string), [])<br/>      })<br/>    }))<br/>  }))</pre> | <pre>[<br/>  {<br/>    "name": "AWSManagedRulesCommonRuleSet"<br/>  },<br/>  {<br/>    "name": "AWSManagedRulesKnownBadInputsRuleSet"<br/>  },<br/>  {<br/>    "name": "AWSManagedRulesAmazonIpReputationList"<br/>  }<br/>]</pre> | no |
 | <a name="input_name"></a> [name](#input\_name) | Name of the web ACL. Also used as a prefix for related resources (IP set, log group, metrics). | `string` | n/a | yes |
 | <a name="input_rate_limit_blocks_alarm_threshold"></a> [rate\_limit\_blocks\_alarm\_threshold](#input\_rate\_limit\_blocks\_alarm\_threshold) | Requests blocked by the rate-limit rule in one 5-minute period that can trigger the production alarm. Used only when rate limiting is enabled. | `number` | `10` | no |
 | <a name="input_rate_limit_per_5_minutes"></a> [rate\_limit\_per\_5\_minutes](#input\_rate\_limit\_per\_5\_minutes) | Maximum requests allowed from a single IP per 5-minute window before it is blocked. Set to 0 to disable rate limiting. | `number` | `0` | no |

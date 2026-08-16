@@ -7,8 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-16
+
 ### Added
 
+- Full configuration support for all current AWS premium managed rule groups:
+  Bot Control, Account Takeover Prevention, Account Creation Fraud Prevention,
+  and Anti-DDoS.
+- Managed group versions and per-rule action overrides for targeted tuning.
+- An inspected IP allowlist mode that runs rate and managed rules before the
+  final allow decision while retaining the existing bypass mode by default.
+- Terraform coverage for all 11 standard and four premium AWS managed groups,
+  premium configuration validation, and strict allowlist ordering.
+- Managed-rule selection guidance, premium configuration examples, and a
+  detailed standard-versus-premium WAF cost model in the README.
 - Optional, disabled-by-default production CloudWatch alarms with a single
   notification path, governance tag enforcement, and Terraform tests.
 - A single-request HTTPS smoke test that refuses redirects, credentials,
